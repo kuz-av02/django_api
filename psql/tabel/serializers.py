@@ -124,6 +124,12 @@ class PostPageSerializer(serializers.ModelSerializer):
         fields = ['id', 'group_id', 'position', 'state', 'url', 'showtime', 'behavior', 'elements', 'clicks', 'options']
 
     def create(self, validated_data):
+        validated_data['day_limit'] = 0
+        validated_data['day_limit_current'] = 0
+        validated_data['day_limit_up'] = 0
+        validated_data['referrer_type'] = 0
+        validated_data['date_add'] = 0
+        validated_data['date_edit'] = 0
         return super().create(validated_data)
 
 

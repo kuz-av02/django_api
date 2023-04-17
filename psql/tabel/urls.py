@@ -36,7 +36,7 @@ urlpatterns = [
 
     path('page/all/', show_all_pages_view),
     path('page/<int:page_id>/', show_page_detail),
-    path('page/create/', show_times_create),
+    path('page/create/', page_create),
 
     path('pages-options/all/', show_all_pages_options),
     path('pages-options/<int:page_id>/', show_page_options_detail),

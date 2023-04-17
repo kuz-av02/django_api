@@ -5,7 +5,7 @@ from django.template.backends import django
 from rest_framework.response import Response
 from rest_framework.decorators import api_view
 from rest_framework import status
-from django.db.models import Q
+from django.db.models import Q, Count
 
 from .serializers import *
 
@@ -37,7 +37,6 @@ def users_options_create(request):
 
 @api_view(['GET', 'PATCH', 'DELETE'])
 def users_options_view_one(request, pk):
-    
     try:
         user_option = LfUsersOptions.objects.get(user_id=pk)
     except LfUsersOptions.DoesNotExist:
@@ -50,6 +49,12 @@ def users_options_view_one(request, pk):
     if request.method == 'PATCH':
         serializer = UsersOptionsSerializerPatch(data=request.data, instance=user_option, partial=True)
         if serializer.is_valid():
+            if request.data.get('workmode') == 0:
+                # Получаем все group_id для данного user_id
+                group_ids = LfGroups.objects.filter(user_id=pk).values_list('id', flat=True)
+                credits_sum = sum([LfGroups.objects.get(id=group).credits for group in group_ids])
+                user_option.credits = credits_sum
+                user_option.save()
             serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -128,6 +133,28 @@ def group_edit(request, group_id):
     if request.method == 'PATCH':
         serializer = GroupSerializerPatch(data=request.data, instance=group, partial=True)
         if serializer.is_valid():
+            interval = request.data.get('interval')
+            if interval is not None:
+                try:
+                    mass = interval[1:len(interval) - 1].split(',')
+                    if mass[0].isdigit() and mass[1].isdigit():
+                        if int(mass[0]) > int(mass[1]) or (int(mass[0]) == 0 and int(mass[1]) != 0) or (
+                                int(mass[1]) > 10800) or len(mass) > 2:
+                            return Response({'error': f'invalid interval value'}, status=status.HTTP_400_BAD_REQUEST)
+                    else:
+                        return Response({'error': f'invalid interval value'}, status=status.HTTP_400_BAD_REQUEST)
+                except LfGroups.DoesNotExist:
+                    return Response({'error': f'invalid interval value'}, status=status.HTTP_400_BAD_REQUEST)
+
+            user_id = request.data.get('user_id')
+            user = LfUsersOptions.objects.get(user_id=user_id)
+            credits_user = decimal.Decimal(request.data.get('credits'))
+            if credits_user > user.credits:
+                return Response({'error': f'The value of the credits field is too large'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            user.credits -= credits_user
+            user.save()
+
             serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -229,7 +256,7 @@ def geo_edit(request, geo_id):
             serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
     if request.method == 'DELETE':
         show_time.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -283,7 +310,7 @@ def show_times_edit(request, pk):
             serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
     if request.method == 'DELETE':
         show_time.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -298,14 +325,24 @@ def show_all_pages_view(request):
 
 @api_view(['POST'])
 def page_create(request):
-
     group_id = request.data.get('group_id')
     try:
         group = LfGroups.objects.get(id=group_id)
     except LfGroups.DoesNotExist:
         return Response({'error': f'Group with group_id={group_id} does not exist'}, status=status.HTTP_400_BAD_REQUEST)
 
-    serializer = PostPageSerializer(group, many=True)
+    user_id = group.user_id
+    # Получаем все group_id для данного user_id
+    group_ids = LfGroups.objects.filter(user_id=user_id).values_list('id', flat=True)
+    # Получаем количество страниц для каждого group_id
+    page_counts = LfPages.objects.filter(group_id__in=group_ids).values('group_id').annotate(total=Count('id'))
+    # Считаем суммарное количество страниц
+    total_pages = sum([page_count['total'] for page_count in page_counts if page_count['group_id'] in group_ids])
+    # Если суммарное количество страниц больше или равно 100, то не разрешаем создавать новую страницу
+    if total_pages >= 100:
+        return Response({'error': f'You cannot create more than 100 pages for this user={user_id}'})
+
+    serializer = PostPageSerializer(data=request.data)
     if serializer.is_valid():
         try:
             showtime = request.data.get('showtime')
@@ -326,40 +363,44 @@ def page_create(request):
 
 @api_view(['GET', 'PATCH', 'DELETE'])
 def show_page_detail(request, page_id):
+    try:
+        page = LfPages.objects.get(id=page_id)
+    except LfPages.DoesNotExist:
+        return Response(status=status.HTTP_404_NOT_FOUND)
+
     if request.method == 'GET':
         queryset = LfPages.objects.filter(id=page_id)
         serializer = ShowPagesSerializer(queryset, many=True)
         return Response(serializer.data)
 
     if request.method == 'PATCH':
-        try:
-            page = LfPages.objects.get(id=page_id)
-        except LfPages.DoesNotExist:
-            return Response(status=status.HTTP_404_NOT_FOUND)
         serializer = PatchPageSerializer(data=request.data, instance=page, partial=True)
         if serializer.is_valid():
-            try:
-                showtime = request.data.get('showtime')
-                mass = showtime[1:len(showtime) - 1].split(',')
-                if mass[0].isdigit() and mass[1].isdigit():
-                    #изменить значение 10800 на app_meta.types_settings[user.type].max_showtime
-                    if int(mass[0]) > int(mass[1]) or (int(mass[1]) > 10800) or len(mass) > 2 or (int(mass[0]) < 15):
+            showtime = request.data.get('showtime')
+            if showtime is not None:
+                try:
+                    mass = showtime[1:len(showtime) - 1].split(',')
+                    if mass[0].isdigit() and mass[1].isdigit():
+                        # изменить значение 10800 на app_meta.types_settings[user.type].max_showtime
+                        if int(mass[0]) > int(mass[1]) or (int(mass[1]) > 10800) or len(mass) > 2 or (int(mass[0]) < 15):
+                            return Response({'error': f'invalid showtime value'}, status=status.HTTP_400_BAD_REQUEST)
+                    else:
                         return Response({'error': f'invalid showtime value'}, status=status.HTTP_400_BAD_REQUEST)
-                else:
+                except LfGroups.DoesNotExist:
                     return Response({'error': f'invalid showtime value'}, status=status.HTTP_400_BAD_REQUEST)
-            except LfGroups.DoesNotExist:
-                return Response({'error': f'invalid showtime value'}, status=status.HTTP_400_BAD_REQUEST)
 
             serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
     if request.method == 'DELETE':
-        try:
-            page = LfPages.objects.get(id=page_id)
-        except LfPages.DoesNotExist:
-            return Response(status=status.HTTP_404_NOT_FOUND)
-    
+        group_id = page.group_id
+        # Получаем количество страниц для group_id
+        page_counts = LfPages.objects.filter(group_id=group_id).values_list('id', flat=True).count()
+        # Удаляем группу, если у нее нет страниц
+        if page_counts == 1:
+            group = LfGroups.objects.get(id=group_id)
+            group.delete()
         page.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -368,7 +409,6 @@ def show_page_detail(request, page_id):
 def show_all_pages_options(request):
     queryset = LfPagesOptions.objects.all().order_by('page_id')
     serializer = ShowPagesOptionsSerializer(queryset, many=True)
-    data = serializer.data
     return Response(serializer.data)
 
 
@@ -391,7 +431,6 @@ def page_options_create(request):
 def show_page_options_detail(request, page_id):
     queryset = LfPagesOptions.objects.filter(page_id=page_id)
     serializer = ShowPagesOptionsSerializer(queryset, many=True)
-    data = serializer.data
     return Response(serializer.data)
 
 
@@ -407,13 +446,13 @@ def page_options_edit(request, pk):
             serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
     if request.method == 'DELETE':
         try:
             pageOptions = LfPagesOptions.objects.get(id=pk)
         except LfPagesOptions.DoesNotExist:
             return Response(status=status.HTTP_404_NOT_FOUND)
-    
+
         pageOptions.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -423,7 +462,6 @@ def show_all_pages_compiled_stats(request):
     twenty_minutes_ago = django.utils.timezone.now() + datetime.timedelta(minutes=-20)
     queryset = LfPagesCompiledStats.objects.filter(date__gte=twenty_minutes_ago).order_by('page_id')
     serializer = ShowPagesCompiledStatsSerializer(queryset, many=True)
-    data = serializer.data # ???
     return Response(serializer.data)
 
 
@@ -490,11 +528,17 @@ def group_options_edit(request, pk):
             serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+
     if request.method == 'DELETE':
         groupOptions.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+# Возвращает возможные языки
+def possible_language():
+    # return "possible languages: 0 - русский, 1 - английский, 2 - другой"
+    return [0, 1, 2]
 
-
+# Возвращает возможные категории
+# def possible_categories():
+#     return  list(LfWebsitesCategory.objects.values_list('id', flat=True))
